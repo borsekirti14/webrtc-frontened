@@ -1,10 +1,14 @@
 <!DOCTYPE html>
 <html>
+
 <head>
+
     <meta charset="UTF-8">
+
     <title>WebRTC Video Test</title>
 
     <style>
+
         body {
             font-family: Arial, sans-serif;
             background: #222;
@@ -23,12 +27,23 @@
             margin-top: 15px;
             white-space: pre-line;
         }
+
+        #session {
+            margin-top: 10px;
+            font-size: 13px;
+            color: #aaa;
+            word-break: break-all;
+        }
+
     </style>
+
 </head>
+
 
 <body>
 
 <h2>Raspberry Pi WebRTC Video</h2>
+
 
 <video
     id="video"
@@ -38,19 +53,100 @@
     controls>
 </video>
 
-<div id="status">Starting...</div>
+
+<div id="status">
+    Starting...
+</div>
+
+
+<div id="session">
+    Session: creating...
+</div>
+
 
 <script src="https://unpkg.com/mqtt@5.14.1/dist/mqtt.min.js"></script>
 
+
 <script>
 
-const MQTT_URL = "wss://connect.smartnode.in:8084/mqtt";
+// ============================================================
+// MQTT
+// ============================================================
 
-const OFFER_TOPIC =
+const MQTT_URL =
+    "wss://connect.smartnode.in:8084/mqtt";
+
+
+// ============================================================
+// MQTT TOPICS
+// ============================================================
+
+// Browser -> Raspberry Pi
+const REQUEST_TOPIC =
+    "smartnode/test/webrtc/request";
+
+
+// Base topic for session-specific offers/answers
+const OFFER_TOPIC_PREFIX =
     "smartnode/test/webrtc/offer";
 
-const ANSWER_TOPIC =
+const ANSWER_TOPIC_PREFIX =
     "smartnode/test/webrtc/answer";
+
+
+// ============================================================
+// UNIQUE SESSION ID
+// ============================================================
+
+// Every browser TAB gets a different session ID.
+//
+// Example:
+//
+// Tab 1 -> 8a123...
+// Tab 2 -> b91de...
+// Tab 3 -> f721c...
+//
+// Therefore tabs never process each other's SDP.
+
+const sessionId =
+    crypto.randomUUID();
+
+
+console.log(
+    "Session ID:",
+    sessionId
+);
+
+
+document.getElementById("session").textContent =
+    "Session: " + sessionId;
+
+
+// ============================================================
+// SESSION TOPICS
+// ============================================================
+
+const OFFER_TOPIC =
+    `${OFFER_TOPIC_PREFIX}/${sessionId}`;
+
+const ANSWER_TOPIC =
+    `${ANSWER_TOPIC_PREFIX}/${sessionId}`;
+
+
+console.log(
+    "Offer topic:",
+    OFFER_TOPIC
+);
+
+console.log(
+    "Answer topic:",
+    ANSWER_TOPIC
+);
+
+
+// ============================================================
+// DOM
+// ============================================================
 
 const video =
     document.getElementById("video");
@@ -58,11 +154,20 @@ const video =
 const status =
     document.getElementById("status");
 
+
+// ============================================================
+// WEBRTC
+// ============================================================
+
 let pc = null;
+
+let offerReceived = false;
+
+let answerPublished = false;
 
 
 // ============================================================
-// STATUS
+// STATUS LOG
 // ============================================================
 
 function log(message) {
@@ -71,67 +176,219 @@ function log(message) {
 
     status.textContent +=
         "\n" + message;
+
 }
 
 
 // ============================================================
-// MQTT
+// ICE SERVERS
 // ============================================================
 
-log("Connecting MQTT...");
+const ICE_SERVERS = [
 
-const client = mqtt.connect(MQTT_URL, {
+    { urls: "stun:stun.l.google.com:19302" },
 
-    clientId:
-        "browser-webrtc-" +
-        Date.now(),
-    username: 'sn_server',
-    password: '54L8MdjWDXw6vKk',
-    clean: true,
+    { urls: "stun:stun1.l.google.com:19302" },
 
-    reconnectPeriod: 2000
-});
+    { urls: "stun:stun2.l.google.com:19302" },
+
+    { urls: "stun:stun3.l.google.com:19302" },
+
+    { urls: "stun:stun4.l.google.com:19302" },
+
+    { urls: "stun:stun.flashdance.cx:3478" },
+
+    { urls: "stun:stun.services.mozilla.com" },
+
+    { urls: "stun:stun.skyway.io:3478" }
+
+];
 
 
-client.on("connect", () => {
+// ============================================================
+// MQTT CONNECT
+// ============================================================
 
-    log("MQTT connected");
+log(
+    "Connecting MQTT..."
+);
 
-    client.subscribe(
-        OFFER_TOPIC,
+
+const client = mqtt.connect(
+    MQTT_URL,
+    {
+
+        clientId:
+            "browser-webrtc-" +
+            sessionId.replace(/-/g, "").substring(0, 20),
+
+        username: "sn_server",
+
+        password: "54L8MdjWDXw6vKk",
+
+        clean: true,
+
+        reconnectPeriod: 2000,
+
+        keepalive: 30
+
+    }
+);
+
+
+// ============================================================
+// MQTT CONNECTED
+// ============================================================
+
+client.on(
+    "connect",
+    () => {
+
+        log(
+            "MQTT connected"
+        );
+
+
+        // ====================================================
+        // SUBSCRIBE TO THIS SESSION'S OFFER
+        // ====================================================
+
+        client.subscribe(
+            OFFER_TOPIC,
+            { qos: 0 },
+
+            (err) => {
+
+                if (err) {
+
+                    console.error(
+                        "Offer subscribe error:",
+                        err
+                    );
+
+                    log(
+                        "ERROR subscribing to offer"
+                    );
+
+                    return;
+                }
+
+
+                log(
+                    "Subscribed to: " +
+                    OFFER_TOPIC
+                );
+
+
+                // =================================================
+                // NOW ASK PI TO CREATE THIS SESSION
+                // =================================================
+
+                requestSession();
+
+            }
+        );
+
+    }
+);
+
+
+// ============================================================
+// MQTT ERROR
+// ============================================================
+
+client.on(
+    "error",
+    (err) => {
+
+        console.error(
+            "MQTT error:",
+            err
+        );
+
+        log(
+            "MQTT ERROR: " +
+            err.message
+        );
+
+    }
+);
+
+
+// ============================================================
+// MQTT RECONNECT
+// ============================================================
+
+client.on(
+    "reconnect",
+    () => {
+
+        log(
+            "MQTT reconnecting..."
+        );
+
+    }
+);
+
+
+// ============================================================
+// REQUEST WEBRTC SESSION
+// ============================================================
+
+function requestSession() {
+
+    log(
+        "Requesting Raspberry Pi WebRTC session..."
+    );
+
+
+    const payload = {
+
+        sessionId:
+
+            sessionId,
+
+        action:
+
+            "start"
+
+    };
+
+
+    client.publish(
+
+        REQUEST_TOPIC,
+
+        JSON.stringify(payload),
+
         { qos: 0 },
+
         (err) => {
 
             if (err) {
 
                 console.error(
-                    "Subscribe error:",
+                    "Session request failed:",
                     err
+                );
+
+                log(
+                    "Session request failed"
                 );
 
                 return;
             }
 
-            log(
-                "Subscribed to: " +
-                OFFER_TOPIC
-            );
 
             log(
-                "Waiting for Raspberry Pi offer..."
+                "Session request sent"
             );
+
         }
+
     );
-});
 
-
-client.on("error", (err) => {
-
-    console.error(
-        "MQTT error:",
-        err
-    );
-});
+}
 
 
 // ============================================================
@@ -140,11 +397,34 @@ client.on("error", (err) => {
 
 client.on(
     "message",
+
     async (topic, message) => {
 
+        // ====================================================
+        // ONLY PROCESS OUR OWN OFFER TOPIC
+        // ====================================================
+
         if (topic !== OFFER_TOPIC) {
+
             return;
+
         }
+
+
+        // ====================================================
+        // PROTECT AGAINST DUPLICATE OFFER
+        // ====================================================
+
+        if (offerReceived) {
+
+            console.log(
+                "Duplicate offer ignored"
+            );
+
+            return;
+
+        }
+
 
         try {
 
@@ -153,18 +433,51 @@ client.on(
                     message.toString()
                 );
 
+
+            console.log(
+                "Pi offer received:",
+                offer
+            );
+
+
+            // =================================================
+            // VERIFY SESSION
+            // =================================================
+
+            if (
+                offer.sessionId !==
+                sessionId
+            ) {
+
+                console.error(
+                    "Session ID mismatch"
+                );
+
+                return;
+
+            }
+
+
+            offerReceived = true;
+
+
             log(
                 "Pi offer received"
             );
+
 
             log(
                 "Session: " +
                 offer.sessionId
             );
 
-            await startWebRTC(offer);
+
+            await startWebRTC(
+                offer
+            );
 
         }
+
         catch (err) {
 
             console.error(
@@ -176,8 +489,11 @@ client.on(
                 "ERROR: " +
                 err.message
             );
+
         }
+
     }
+
 );
 
 
@@ -185,224 +501,346 @@ client.on(
 // WEBRTC
 // ============================================================
 
-async function startWebRTC(offer) {
+async function startWebRTC(
+    offer
+) {
+
+    // ========================================================
+    // PROTECT AGAINST DUPLICATE CONNECTION
+    // ========================================================
+
+    if (pc) {
+
+        console.log(
+            "PeerConnection already exists"
+        );
+
+        return;
+
+    }
+
 
     log(
         "Creating PeerConnection..."
     );
 
-    pc = new RTCPeerConnection({
 
-        iceServers: [
-            { urls: "stun:stun.l.google.com:19302" },
-    { urls: "stun:stun1.l.google.com:19302" },
-    { urls: "stun:stun2.l.google.com:19302" },
-    { urls: "stun:stun3.l.google.com:19302" },
-    { urls: "stun:stun4.l.google.com:19302" },
+    // ========================================================
+    // CREATE PEER CONNECTION
+    // ========================================================
 
-    { urls: "stun:stun.flashdance.cx:3478" },
-    { urls: "stun:stun.services.mozilla.com" },
-    { urls: "stun:stun.skyway.io:3478" }
+    pc =
+        new RTCPeerConnection({
 
-        ]
-    });
+            iceServers:
+                ICE_SERVERS,
+
+            iceCandidatePoolSize:
+                10
+
+        });
+
+
+    console.log(
+        "PeerConnection:",
+        pc
+    );
 
 
     // ========================================================
-    // IMPORTANT: ONTRACK
+    // ONTRACK
+    // ========================================================
+    //
+    // IMPORTANT:
+    // Register this BEFORE setRemoteDescription().
+    //
     // ========================================================
 
-    pc.ontrack = async (event) => {
+    pc.ontrack =
+        async (event) => {
 
-        console.log(
-            "========== ONTRACK =========="
-        );
-
-        console.log(
-            "Track:",
-            event.track
-        );
-
-        console.log(
-            "Kind:",
-            event.track.kind
-        );
-
-        console.log(
-            "Streams:",
-            event.streams
-        );
-
-        console.log(
-            "Track readyState:",
-            event.track.readyState
-        );
-
-        console.log(
-            "=============================="
-        );
+            console.log(
+                "========== ONTRACK =========="
+            );
 
 
-        if (event.track.kind !== "video") {
-
-            return;
-        }
-
-
-        log(
-            "Remote video track received"
-        );
-
-
-        // ----------------------------------------------------
-        // IMPORTANT
-        // ----------------------------------------------------
-
-        let stream;
-
-
-        if (
-            event.streams &&
-            event.streams.length > 0
-        ) {
-
-            stream =
-                event.streams[0];
-
-        }
-        else {
-
-            // Fallback in case the stream
-            // is not supplied with the event.
-
-            stream =
-                new MediaStream();
-
-            stream.addTrack(
+            console.log(
+                "Track:",
                 event.track
             );
-        }
 
 
-        console.log(
-            "Using MediaStream:",
-            stream
-        );
+            console.log(
+                "Kind:",
+                event.track.kind
+            );
 
 
-        video.srcObject =
-            stream;
+            console.log(
+                "Streams:",
+                event.streams
+            );
 
 
-        console.log(
-            "video.srcObject:",
-            video.srcObject
-        );
+            console.log(
+                "Track readyState:",
+                event.track.readyState
+            );
 
 
-        // ----------------------------------------------------
-        // Wait until browser knows video dimensions
-        // ----------------------------------------------------
+            console.log(
+                "=============================="
+            );
 
-        video.onloadedmetadata =
-            async () => {
 
-                console.log(
-                    "loadedmetadata"
+            if (
+                event.track.kind !==
+                "video"
+            ) {
+
+                return;
+
+            }
+
+
+            log(
+                "Remote video track received"
+            );
+
+
+            // =================================================
+            // GET MEDIA STREAM
+            // =================================================
+
+            let stream;
+
+
+            if (
+                event.streams &&
+                event.streams.length > 0
+            ) {
+
+                stream =
+                    event.streams[0];
+
+            }
+
+            else {
+
+                stream =
+                    new MediaStream();
+
+
+                stream.addTrack(
+                    event.track
                 );
 
-                console.log(
-                    "videoWidth:",
-                    video.videoWidth
-                );
-
-                console.log(
-                    "videoHeight:",
-                    video.videoHeight
-                );
+            }
 
 
-                log(
-                    "Video dimensions: " +
-                    video.videoWidth +
-                    "x" +
-                    video.videoHeight
-                );
+            // =================================================
+            // ASSIGN VIDEO
+            // =================================================
+
+            video.srcObject =
+                stream;
 
 
-                try {
+            console.log(
+                "video.srcObject:",
+                video.srcObject
+            );
 
-                    await video.play();
+
+            // =================================================
+            // VIDEO METADATA
+            // =================================================
+
+            video.onloadedmetadata =
+                async () => {
 
                     console.log(
-                        "VIDEO PLAYING"
+                        "loadedmetadata"
                     );
+
+
+                    console.log(
+                        "videoWidth:",
+                        video.videoWidth
+                    );
+
+
+                    console.log(
+                        "videoHeight:",
+                        video.videoHeight
+                    );
+
 
                     log(
-                        "Video playback started"
+                        "Video dimensions: " +
+                        video.videoWidth +
+                        "x" +
+                        video.videoHeight
                     );
 
-                }
-                catch (err) {
 
-                    console.error(
-                        "video.play() failed:",
-                        err
-                    );
+                    try {
 
-                    log(
-                        "Playback error: " +
-                        err.message
-                    );
-                }
-            };
+                        await video.play();
 
 
-        // Also explicitly call play
-        // in case metadata has already loaded.
+                        console.log(
+                            "VIDEO PLAYING"
+                        );
 
-        try {
 
-            await video.play();
+                        log(
+                            "Video playback started"
+                        );
 
-            console.log(
-                "video.play() completed"
-            );
+                    }
 
-        }
-        catch (err) {
+                    catch (err) {
 
-            console.log(
-                "Initial play() waiting:",
-                err.message
-            );
-        }
-    };
+                        console.error(
+                            "video.play() failed:",
+                            err
+                        );
+
+
+                        log(
+                            "Playback error: " +
+                            err.message
+                        );
+
+                    }
+
+                };
+
+
+            // =================================================
+            // EXPLICIT PLAY
+            // =================================================
+
+            try {
+
+                await video.play();
+
+                console.log(
+                    "video.play() completed"
+                );
+
+            }
+
+            catch (err) {
+
+                console.log(
+                    "Initial play() waiting:",
+                    err.message
+                );
+
+            }
+
+        };
 
 
     // ========================================================
-    // ICE
+    // ICE CONNECTION STATE
     // ========================================================
 
     pc.oniceconnectionstatechange =
         () => {
 
+            const state =
+                pc.iceConnectionState;
+
+
             log(
                 "ICE state: " +
-                pc.iceConnectionState
+                state
             );
+
+
+            if (
+                state === "failed"
+            ) {
+
+                log(
+                    "❌ ICE connection failed"
+                );
+
+            }
+
+
+            if (
+                state === "connected" ||
+                state === "completed"
+            ) {
+
+                log(
+                    "✅ ICE connected"
+                );
+
+            }
+
         };
 
+
+    // ========================================================
+    // WEBRTC CONNECTION STATE
+    // ========================================================
 
     pc.onconnectionstatechange =
         () => {
 
+            const state =
+                pc.connectionState;
+
+
             log(
                 "WebRTC state: " +
-                pc.connectionState
+                state
             );
+
+
+            if (
+                state === "connected"
+            ) {
+
+                log(
+                    "✅ WebRTC connected"
+                );
+
+            }
+
+
+            if (
+                state === "failed"
+            ) {
+
+                log(
+                    "❌ WebRTC connection failed"
+                );
+
+            }
+
+
+            if (
+                state === "disconnected"
+            ) {
+
+                log(
+                    "⚠️ WebRTC disconnected"
+                );
+
+            }
+
         };
 
+
+    // ========================================================
+    // ICE GATHERING
+    // ========================================================
 
     pc.onicegatheringstatechange =
         () => {
@@ -411,6 +849,34 @@ async function startWebRTC(offer) {
                 "Browser ICE gathering:",
                 pc.iceGatheringState
             );
+
+        };
+
+
+    // ========================================================
+    // ICE CANDIDATE DEBUG
+    // ========================================================
+
+    pc.onicecandidate =
+        (event) => {
+
+            if (event.candidate) {
+
+                console.log(
+                    "Browser ICE candidate:",
+                    event.candidate.candidate
+                );
+
+            }
+
+            else {
+
+                console.log(
+                    "Browser ICE gathering complete"
+                );
+
+            }
+
         };
 
 
@@ -422,11 +888,14 @@ async function startWebRTC(offer) {
         "Setting remote description..."
     );
 
+
     await pc.setRemoteDescription({
 
-        type: "offer",
+        type:
+            "offer",
 
-        sdp: offer.sdp
+        sdp:
+            offer.sdp
 
     });
 
@@ -443,6 +912,7 @@ async function startWebRTC(offer) {
     log(
         "Creating answer..."
     );
+
 
     const answer =
         await pc.createAnswer();
@@ -468,7 +938,7 @@ async function startWebRTC(offer) {
     ) {
 
         await new Promise(
-            resolve => {
+            (resolve) => {
 
                 const check = () => {
 
@@ -482,8 +952,11 @@ async function startWebRTC(offer) {
                             check
                         );
 
+
                         resolve();
+
                     }
+
                 };
 
 
@@ -494,8 +967,10 @@ async function startWebRTC(offer) {
 
 
                 check();
+
             }
         );
+
     }
 
 
@@ -505,25 +980,50 @@ async function startWebRTC(offer) {
 
 
     // ========================================================
-    // SEND ANSWER
+    // PREVENT DUPLICATE ANSWER
+    // ========================================================
+
+    if (answerPublished) {
+
+        console.log(
+            "Answer already published"
+        );
+
+        return;
+
+    }
+
+
+    // ========================================================
+    // ANSWER PAYLOAD
+    // ========================================================
+
+    const payload = {
+
+        sessionId:
+
+            sessionId,
+
+        type:
+
+            "answer",
+
+        sdp:
+
+            pc.localDescription.sdp
+
+    };
+
+
+    // ========================================================
+    // PUBLISH ANSWER
     // ========================================================
 
     client.publish(
 
         ANSWER_TOPIC,
 
-        JSON.stringify({
-
-            sessionId:
-                offer.sessionId,
-
-            type:
-                "answer",
-
-            sdp:
-                pc.localDescription.sdp
-
-        }),
+        JSON.stringify(payload),
 
         { qos: 0 },
 
@@ -536,14 +1036,34 @@ async function startWebRTC(offer) {
                     err
                 );
 
+
+                log(
+                    "❌ Answer publish failed"
+                );
+
+
                 return;
+
             }
 
+
+            answerPublished = true;
+
+
             log(
-                "ANSWER published"
+                "✅ ANSWER published"
             );
+
+
+            console.log(
+                "Answer topic:",
+                ANSWER_TOPIC
+            );
+
         }
+
     );
+
 }
 
 
@@ -551,47 +1071,194 @@ async function startWebRTC(offer) {
 // VIDEO DEBUGGING
 // ============================================================
 
-setInterval(() => {
+setInterval(
+    () => {
 
-    if (!pc) {
-        return;
-    }
+        if (!pc) {
+
+            return;
+
+        }
+
+
+        console.log(
+            "VIDEO DEBUG:",
+            {
+
+                readyState:
+                    video.readyState,
+
+                paused:
+                    video.paused,
+
+                ended:
+                    video.ended,
+
+                videoWidth:
+                    video.videoWidth,
+
+                videoHeight:
+                    video.videoHeight,
+
+                currentTime:
+                    video.currentTime,
+
+                srcObject:
+                    video.srcObject,
+
+                connectionState:
+                    pc.connectionState,
+
+                iceState:
+                    pc.iceConnectionState
+
+            }
+        );
+
+
+    },
+    5000
+);
+
+
+// ============================================================
+// CLOSE / CLEANUP
+// ============================================================
+
+async function stopSession() {
 
     console.log(
-        "VIDEO DEBUG:",
-        {
-            readyState:
-                video.readyState,
-
-            paused:
-                video.paused,
-
-            ended:
-                video.ended,
-
-            videoWidth:
-                video.videoWidth,
-
-            videoHeight:
-                video.videoHeight,
-
-            currentTime:
-                video.currentTime,
-
-            srcObject:
-                video.srcObject,
-
-            connectionState:
-                pc.connectionState,
-
-            iceState:
-                pc.iceConnectionState
-        }
+        "Stopping session:",
+        sessionId
     );
 
-}, 2000);
+
+    // ========================================================
+    // TELL PI TO STOP THIS SESSION
+    // ========================================================
+
+    if (
+        client &&
+        client.connected
+    ) {
+
+        const payload = {
+
+            sessionId:
+                sessionId,
+
+            action:
+                "stop"
+
+        };
+
+
+        client.publish(
+
+            REQUEST_TOPIC,
+
+            JSON.stringify(payload),
+
+            {
+                qos: 0,
+                retain: false
+            }
+
+        );
+
+    }
+
+
+    // ========================================================
+    // CLOSE PEER CONNECTION
+    // ========================================================
+
+    if (pc) {
+
+        try {
+
+            pc.close();
+
+        }
+
+        catch (_) {}
+
+        pc = null;
+
+    }
+
+
+    // ========================================================
+    // STOP VIDEO
+    // ========================================================
+
+    if (video.srcObject) {
+
+        try {
+
+            video.srcObject
+                .getTracks()
+                .forEach(
+                    track => track.stop()
+                );
+
+        }
+
+        catch (_) {}
+
+        video.srcObject = null;
+
+    }
+
+}
+
+
+// ============================================================
+// PAGE CLOSE
+// ============================================================
+
+window.addEventListener(
+    "beforeunload",
+    () => {
+
+        // Do not use async here.
+        //
+        // Just publish the stop message if
+        // MQTT is still connected.
+
+        if (
+            client &&
+            client.connected
+        ) {
+
+            client.publish(
+
+                REQUEST_TOPIC,
+
+                JSON.stringify({
+
+                    sessionId:
+                        sessionId,
+
+                    action:
+                        "stop"
+
+                }),
+
+                {
+                    qos: 0,
+                    retain: false
+                }
+
+            );
+
+        }
+
+    }
+);
 
 </script>
 
 </body>
+
 </html>
